@@ -1,0 +1,117 @@
+---
+title: "MachLearFinals"
+author: "Giulio Pergola"
+date: "August 28, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. This project aims to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The present report addresses the prediction of how well participants performed the exercise based on the accelerometer readings. The strategy used is to fit a random forest, a support vector machine, and a linear discriminant analysis model in a k-fold cross-validation approach. Then, these three models are combined into a single model. This final model is applied to the test data.
+
+## Preparation
+```{r results='hide', message=FALSE, warning=FALSE}
+rm(list = ls())
+library(caret)
+library(AppliedPredictiveModeling)
+library(randomForest)
+library(klaR)
+library(doParallel)
+cl <- makePSOCKcluster(20)
+registerDoParallel(cl)
+set.seed(19)
+```
+
+## Reading and exploring the data
+
+```{r}
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+
+head(testing[,1:20])
+head(testing[,21:40])
+head(testing[,41:60])
+table(training$classe)
+```
+
+This short exploration reveals that many variables have not been assessed in the testing data. Including these variables in the training would make the algorithm unnecessarily slow, as they cannot be used later in the testing dataset. Therefore, it is better to remove them. Also notable, classes are unbalanced.
+
+```{r}
+NAcols <- which(sapply(testing, FUN = function(x) {all(is.na(x) == TRUE) == TRUE}) == TRUE )
+testing[,NAcols] <- list(NULL)
+training[,NAcols] <- list(NULL)
+
+length(which(apply(training, 1, FUN = function(x) {any(is.na(x) == TRUE) == TRUE}) == TRUE ))
+```
+
+The previous step apparently removed all NAs. There is no need to exclude any observations.
+
+## Model training and accuracy evaluation
+
+The strategy is to fit three different models and then combine them. As there are very many observations, a 20-fold CV is an option that might have less bias than a 10-fold. It is also a good idea to leave some samples out to obtain an evaluation of out of sample performance. As classes are unbalanced and the dataset is large it is best to balance them.
+```{r cache = TRUE, warning=FALSE}
+inTrain <- createDataPartition(training$classe, p = .99, list = FALSE)
+IN <- training[inTrain,]
+OUT <- training[-inTrain,]
+
+IN <- downSample(IN, IN$classe)
+IN[,ncol(IN)] <- NULL
+folds <- 20
+cvIndex <- createFolds(IN$classe, folds, returnTrain = TRUE)
+train_control<- trainControl(index = cvIndex, method="cv", number=folds, savePredictions = TRUE, allowParallel = TRUE) 
+
+rfMod <- train(classe ~ ., method = "rf", data = IN, trControl = train_control)
+svmMod <- train(classe ~ ., method = "svmLinear", data = IN, trControl = train_control)
+ldaMod <- train(classe ~ ., method = "lda", data = IN, trControl = train_control)
+
+rfAcc <-1-mean(rfMod$finalModel$err.rate)
+svmAcc <- sum(ifelse(svmMod$pred$pred==svmMod$pred$obs,1,0))/nrow(svmMod$pred)
+ldaAcc <- ldaMod$results$Accuracy
+print(paste0("Random forest accuracy is ", rfAcc))
+print(paste0("Support vector machine accuracy is ", svmAcc))
+print(paste0("Linear disciminant analysis accuracy is ", ldaAcc))
+```
+
+Accuracies are extremely high. When combining them into a single model, hopefully results will be at least as accurate as the best model, i.e.:
+
+```{r}
+expAcc <- max(rfAcc, svmAcc, ldaAcc)
+
+print(floor(expAcc*20))
+```
+
+On the testing sample this model potentially predicts correctly at least 19 of the 20 observations. But this is still not an accurate estimate: an out of sample estimate is needed.
+
+```{r cache = TRUE}
+combDF <- data.frame(classe = svmMod$pred$obs, 
+                     rf = rfMod$pred[rfMod$pred$mtry==rownames(rfMod$bestTune),]$pred, 
+                     svm = svmMod$pred$pred, 
+                     lda = ldaMod$pred$pred)
+
+combMod <- train(classe ~ ., method = "svmLinear", data = combDF)
+stopCluster(cl)
+
+OUTdf <- data.frame(classe = OUT$classe,
+                    rf = predict(rfMod, newdata = OUT), 
+                    svm = predict(svmMod, newdata = OUT), 
+                    lda = predict(ldaMod, newdata = OUT))
+
+OUTpred <- predict(combMod, newdata = OUTdf)
+expAcc <- sum(ifelse(OUTpred==OUTdf$classe, 1, 0))/nrow(OUTdf)
+print(paste0("Out of sample accuracy is ", expAcc))
+
+print(paste0("Prediction in the test set may be correct in ", floor(expAcc*20), " of the 20 cases"))
+
+testDF <- data.frame(rf = predict(rfMod, newdata = testing), 
+                     svm = predict(svmMod, newdata = testing), 
+                     lda = predict(ldaMod, newdata = testing))
+
+combPred <- predict(combMod, newdata = testDF)
+print(combPred)
+```
+
+The ouput shows the expected predictions on the testing dataset.
